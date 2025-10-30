@@ -274,11 +274,11 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
         try:
             for attempt in range(4):
                 if attempt == 0:
-                    dl_url = link.get("direct_url")
+                    dl_url = link["original_url"]
                     label = "proxied primary"
                 elif attempt == 1:
-                    dl_url = link.get("original_url")
-                    label = "original fallback"
+                    dl_url = link["direct_url"]
+                    label = "direct fallback"
                 elif attempt == 2:
                     logger.info(f"Refreshing links for {name}")
                     new_resp = await get_links(source_url)
@@ -289,17 +289,14 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
                     if not new_link:
                         logger.error(f"File {name} not found in refreshed links")
                         break
-                    dl_url = new_link.get("direct_url")
+                    dl_url = new_link["original_url"]
                     label = "new proxied"
                 elif attempt == 3:
                     if not new_link:
                         break
-                    dl_url = new_link.get("original_url")
-                    label = "new original"
+                    dl_url = new_link["direct_url"]
+                    label = "new direct"
                 else:
-                    break
-                if not dl_url:
-                    logger.error(f"No download URL available for {name}")
                     break
                 logger.info(f"Attempting {label} download for {name}")
                 success, file_path = await download_file(dl_url, name, size_mb, status_message)
@@ -326,7 +323,6 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
             if file_path and os.path.exists(file_path):
                 logger.debug(f"Cleaning up temporary file: {file_path}")
                 os.unlink(file_path)
-
 async def process_url(source_url: str, chat_id: int, source_type: str = "user", original_message: Message = None):
     logger.info(f"Processing URL: {source_url} from {source_type} {chat_id}")
     config = await get_config()
