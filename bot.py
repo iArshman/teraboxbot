@@ -276,11 +276,11 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
         try:
             for attempt in range(4):
                 if attempt == 0:
-                    dl_url = link["original_url"]
-                    label = "proxied primary"
-                elif attempt == 1:
                     dl_url = link["direct_url"]
-                    label = "direct fallback"
+                    label = "direct primary"
+                elif attempt == 1:
+                    dl_url = link["original_url"]
+                    label = "proxied fallback"
                 elif attempt == 2:
                     logger.info(f"Refreshing links for {name}")
                     new_resp = await get_links(source_url)
@@ -291,13 +291,13 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
                     if not new_link:
                         logger.error(f"File {name} not found in refreshed links")
                         break
-                    dl_url = new_link["original_url"]
-                    label = "new proxied"
+                    dl_url = new_link["direct_url"]
+                    label = "new direct"
                 elif attempt == 3:
                     if not new_link:
                         break
-                    dl_url = new_link["direct_url"]
-                    label = "new direct"
+                    dl_url = new_link["original_url"]
+                    label = "new proxied"
                 else:
                     break
                 logger.info(f"Attempting {label} download for {name}")
