@@ -254,7 +254,7 @@ async def send_video_to_user(file_path: str, video_name: str, chat_id: int, repl
         return False
 
 async def process_file(
-    link: Dict,
+    link: dict,
     source_url: str,
     original_chat_id: int = None,
     source_type: str = "user",
