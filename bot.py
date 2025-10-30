@@ -5,6 +5,7 @@ import os
 import tempfile
 import time
 import logging
+import aiofiles
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.types import Message, FSInputFile, BotCommand
 from aiogram.filters import Command
