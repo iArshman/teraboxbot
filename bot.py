@@ -14,7 +14,7 @@ from aiogram.exceptions import TelegramBadRequest
 from motor.motor_asyncio import AsyncIOMotorClient
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from dotenv import load_dotenv
-from aiohttp.client_exceptions import ClientPayloadError, ContentLengthError
+from aiohttp.client_exceptions import ClientPayloadError
 
 # Load .env file
 load_dotenv()
@@ -205,7 +205,8 @@ async def download_file(dl_url: str, filename: str, size_mb: float, status_messa
 
         return True, temp_path
 
-    except (ClientPayloadError, ContentLengthError) as e:
+    except ClientPayloadError as e:
+
         logger.error(f"Download error for {filename}: {e}")
         if attempt < max_retries - 1:
             logger.info(f"Retrying {filename} after {backoff}s...")
