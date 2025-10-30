@@ -325,7 +325,6 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
                 logger.debug(f"Cleaning up temporary file: {file_path}")
                 os.unlink(file_path)
 
-does it use proxifed url first?
 
 async def process_url(source_url: str, chat_id: int, source_type: str = "user", original_message: Message = None):
     logger.info(f"Processing URL: {source_url} from {source_type} {chat_id}")
