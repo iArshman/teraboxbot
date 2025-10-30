@@ -5,7 +5,6 @@ import os
 import tempfile
 import time
 import logging
-import aiofiles
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.types import Message, FSInputFile, BotCommand
 from aiogram.filters import Command
@@ -15,7 +14,6 @@ from aiogram.exceptions import TelegramBadRequest
 from motor.motor_asyncio import AsyncIOMotorClient
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from dotenv import load_dotenv
-from aiohttp.client_exceptions import ClientPayloadError
 
 # Load .env file
 load_dotenv()
@@ -58,6 +56,15 @@ DEFAULT_CONFIG = {
     "broadcast_chats": [-1002780909369],
     "admin_password": "11223344"
 }
+
+# Validate required environment variables
+if not BOT_TOKEN:
+    logger.error("BOT_TOKEN is not set in environment variables")
+    raise ValueError("BOT_TOKEN is required")
+if not MONGO_URI:
+    logger.error("MONGO_URI is not set in environment variables")
+    raise ValueError("MONGO_URI is required")
+    
 
 session = AiohttpSession(api=TelegramAPIServer.from_base(SELF_HOSTED_API))
 bot = Bot(token=BOT_TOKEN, session=session)
@@ -134,105 +141,69 @@ async def get_links(source_url: str):
             logger.error(f"Error fetching links for {source_url}: {str(e)}")
     return None
 
-async def download_file(dl_url: str, filename: str, size_mb: float, status_message: Message, attempt: int = 0, max_retries: int = 3):
-    """
-    Improved resilient downloader with resume support, progress updates,
-    and robust retry/backoff for ContentLengthError.
-    """
-    temp_path = os.path.join(tempfile.gettempdir(), filename)
+async def download_file(dl_url: str, filename: str, size_mb: float, status_message: Message, attempt: int = 0):
+    path = tempfile.NamedTemporaryFile(delete=False).name
+    downloaded = 0
     start_time = time.time()
-    backoff = 2 ** attempt
-
+    last_update_time = 0
+    logger.info(f"Starting download of {filename} from {dl_url} (attempt {attempt + 1})")
     try:
-        headers = {}
-        if os.path.exists(temp_path):
-            existing_size = os.path.getsize(temp_path)
-            headers["Range"] = f"bytes={existing_size}-"
-        else:
-            existing_size = 0
-
         async with sem:
             async with aiohttp.ClientSession() as session:
-                async with session.get(dl_url, headers=headers, timeout=aiohttp.ClientTimeout(total=None)) as resp:
-                    if resp.status not in (200, 206):
-                        raise Exception(f"HTTP {resp.status}")
-
-                    total_size = int(resp.headers.get("Content-Length", 0)) + existing_size
-                    total_mb = total_size / (1024 * 1024) if total_size else size_mb
-                    mode = "ab" if existing_size else "wb"
-
-                    logger.info(f"Starting download: {filename} (attempt {attempt+1}) from {dl_url}")
-
-                    downloaded = existing_size
-                    last_update_time = 0
-
-                    async with aiofiles.open(temp_path, mode) as f:
-                        async for chunk in resp.content.iter_chunked(1024 * 256):
-                            if not chunk:
-                                break
-                            await f.write(chunk)
-                            downloaded += len(chunk)
-
-                            # Progress update every 5 seconds
-                            if status_message and time.time() - last_update_time > 5:
-                                elapsed = time.time() - start_time
-                                speed_mb_s = downloaded / 1024 / 1024 / elapsed if elapsed > 0 else 0
-                                percent = (downloaded / total_size * 100) if total_size else 0
-                                try:
-                                    await status_message.edit_text(
-                                        f"📥 **Downloading** `{filename}`\n"
-                                        f"📦 Size: **{total_mb:.2f} MB**\n"
-                                        f"⬇️ Progress: **{downloaded / 1024 / 1024:.2f}/{total_mb:.2f} MB** (**{percent:.0f}%**)\n"
-                                        f"⚡ Speed: **{speed_mb_s:.2f} MB/s**",
-                                        parse_mode="Markdown"
-                                    )
-                                except TelegramBadRequest as e:
-                                    if "message is not modified" not in str(e):
-                                        logger.warning(f"Telegram edit error: {e}")
+                async with session.get(dl_url) as resp:
+                    if resp.status != 200:
+                        logger.error(f"Download failed for {filename}, status: {resp.status}")
+                        raise Exception(f"HTTP Status {resp.status}")
+                    content_length = int(resp.headers.get('Content-Length', 0))
+                    total_mb = content_length / (1024 * 1024) if content_length else size_mb
+                    async for chunk in resp.content.iter_chunked(5 * 1024 * 1024):
+                        with open(path, 'ab') as f:
+                            f.write(chunk)
+                        downloaded += len(chunk)
+                        if time.time() - last_update_time > 5 and status_message:
+                            elapsed = time.time() - start_time
+                            speed_bps = (downloaded / elapsed) if elapsed > 0 else 0
+                            speed_mbps = speed_bps / (1024 * 1024)
+                            percent = (downloaded / (total_mb * 1024 * 1024)) * 100 if total_mb else 0
+                            progress_text = (
+                                f"📥 **Downloading** `{filename}`\n"
+                                f"📦 Size: **{total_mb:.2f} MB**\n"
+                                f"⬇️ Progress: **{downloaded / (1024 * 1024):.2f}/{total_mb:.2f} MB** (**{percent:.0f}%**)\n"
+                                f"⚡ Speed: **{speed_mbps:.2f} MB/s**"
+                            )
+                            try:
+                                await bot.edit_message_text(
+                                    chat_id=status_message.chat.id,
+                                    message_id=status_message.message_id,
+                                    text=progress_text,
+                                    parse_mode="Markdown"
+                                )
                                 last_update_time = time.time()
-
-        # Validate size
-        final_size = os.path.getsize(temp_path)
-        if total_size and final_size < total_size * 0.9:
-            raise ClientPayloadError("Incomplete file: size mismatch")
-
-        logger.info(f"✅ Download complete: {filename} ({final_size / 1024 / 1024:.2f} MB)")
-
+                            except TelegramBadRequest as e:
+                                if "message is not modified" not in str(e):
+                                    logger.error(f"Telegram update error: {e}")
+                    logger.info(f"Download completed for {filename}")
+    except Exception as e:
+        logger.error(f"Download error for {filename}: {str(e)}")
+        if os.path.exists(path):
+            os.unlink(path)
+        if attempt < 2:
+            backoff = 2 ** attempt
+            logger.info(f"Retrying download for {filename} after {backoff}s")
+            await asyncio.sleep(backoff)
+            return await download_file(dl_url, filename, size_mb, status_message, attempt + 1)
         if status_message:
             try:
-                await bot.delete_message(status_message.chat.id, status_message.message_id)
-            except Exception:
+                await status_message.edit_text(f"❌ Failed to download `{filename}` after {attempt+1} attempts.", parse_mode="Markdown")
+            except:
                 pass
-
-        return True, temp_path
-
-    except ClientPayloadError as e:
-
-        logger.error(f"Download error for {filename}: {e}")
-        if attempt < max_retries - 1:
-            logger.info(f"Retrying {filename} after {backoff}s...")
-            await asyncio.sleep(backoff)
-            return await download_file(dl_url, filename, size_mb, status_message, attempt + 1, max_retries)
-        else:
-            logger.error(f"❌ Failed to download {filename} after {max_retries} retries.")
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-            if status_message:
-                await status_message.edit_text(
-                    f"❌ Failed to download `{filename}` after {max_retries} attempts.",
-                    parse_mode="Markdown"
-                )
-            return False, None
-
-    except Exception as e:
-        logger.error(f"Unexpected error downloading {filename}: {e}")
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-        if attempt < max_retries - 1:
-            await asyncio.sleep(backoff)
-            return await download_file(dl_url, filename, size_mb, status_message, attempt + 1, max_retries)
         return False, None
-
+    if status_message:
+        try:
+            await bot.delete_message(status_message.chat.id, status_message.message_id)
+        except:
+            pass
+    return True, path
 
 async def broadcast_video(file_path: str, video_name: str, broadcast_type: str):
     config = await get_config()
@@ -283,26 +254,26 @@ async def send_video_to_user(file_path: str, video_name: str, chat_id: int, repl
         return False
 
 async def process_file(
-    link: dict,
+    link: Dict,
     source_url: str,
     original_chat_id: int = None,
     source_type: str = "user",
-    status_message: Message = None,
-    original_message: Message = None
+    status_message: Optional[Message] = None,
+    original_message: Optional[Message] = None
 ):
     name = link.get("name", "unknown")
     size_mb = link.get("size_mb", 0)
     size_gb = size_mb / 1024
-    logger.info(f"Processing file: {name}, size: {size_mb} MB, source: {source_type}")
+    logger.info(f"Processing file: {name}, size: {size_mb} MB ({size_gb:.2f} GB), source: {source_type}")
 
     config = await get_config()
 
-    # File validation and user feedback
+    # === Validation for user/admin messages ===
     if status_message and source_type != "channel":
         if size_gb > 2:
             logger.warning(f"File {name} size {size_gb:.2f} GB exceeds 2 GB limit")
             await status_message.edit_text(
-                f"❌ File `{name}` is too large (**{size_gb:.2f} GB**). Max 2 GB.",
+                f"File `{name}` is too large (**{size_gb:.2f} GB**). Max 2 GB.",
                 parse_mode="Markdown"
             )
             return
@@ -310,64 +281,87 @@ async def process_file(
         if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.webm')):
             logger.info(f"Skipping non-video file: {name}")
             await status_message.edit_text(
-                f"ℹ️ Skipped non-video file: `{name}`. Only video files are processed.",
+                f"Skipped non-video file: `{name}`. Only video files are processed.",
                 parse_mode="Markdown"
             )
             return
 
-        await status_message.edit_text(f"📥 Found: `{name}`. Starting download...", parse_mode="Markdown")
+        await status_message.edit_text(
+            f"Found: `{name}`. Starting download...",
+            parse_mode="Markdown"
+        )
 
     file_path = None
     new_link = None
 
-    async with sem:
+    async with sem:  # Assuming 'sem' is a global asyncio.Semaphore
         try:
+            # === Retry Logic: 4 attempts ===
             for attempt in range(4):
+                dl_url = None
+                label = ""
+
+                # Attempt 0: Original source URL (direct, not proxied)
                 if attempt == 0:
-                    dl_url = link.get("download_url") or link.get("original_url")
-                    label = "proxied primary"
-                elif attempt == 1:
                     dl_url = link.get("original_url")
-                    label = "direct fallback"
+                    label = "direct primary"
+
+                # Attempt 1: Proxied URL (via your proxy service)
+                elif attempt == 1:
+                    dl_url = link.get("direct_url")  # This is actually PROXIED
+                    label = "proxied fallback"
+
+                # Attempt 2: Refresh links → try new direct (original)
                 elif attempt == 2:
                     logger.info(f"Refreshing links for {name}")
                     new_resp = await get_links(source_url)
                     if not new_resp or "links" not in new_resp:
                         logger.error(f"Failed to refresh links for {name}")
                         break
+
                     new_link = next((l for l in new_resp["links"] if l.get("name") == name), None)
                     if not new_link:
                         logger.error(f"File {name} not found in refreshed links")
                         break
-                    dl_url = new_link.get("download_url") or new_link.get("original_url")
-                    label = "new proxied"
+
+                    dl_url = new_link.get("original_url")
+                    label = "new direct"
+
+                # Attempt 3: Refresh links → try new proxied
                 elif attempt == 3:
                     if not new_link:
                         break
-                    dl_url = new_link.get("original_url")
-                    label = "new direct"
-                else:
-                    break
+                    dl_url = new_link.get("direct_url")  # PROXIED
+                    label = "new proxied"
 
-                logger.info(f"Attempting {label} download for {name}")
+                if not dl_url:
+                    logger.warning(f"No URL available for attempt {attempt} ({label})")
+                    continue
+
+                logger.info(f"Attempt {attempt}: Trying {label} → {dl_url[:60]}...")
+
                 success, file_path = await download_file(dl_url, name, size_mb, status_message)
                 if success:
+                    logger.info(f"Download succeeded using {label}")
                     break
-                logger.warning(f"{label.capitalize()} failed for {name}, retrying...")
+                else:
+                    logger.warning(f"{label.capitalize()} failed for {name}, continuing...")
 
+            # === All attempts failed ===
             if not file_path:
-                logger.error(f"File {name} failed to download after all retries")
+                error_msg = f"Failed to download `{name}` from `{source_url}` after all attempts."
+                logger.error(error_msg)
                 if status_message or source_type != "channel" or config.get("channel_broadcast_enabled"):
                     await bot.send_message(
                         original_chat_id,
-                        f"❌ Failed to download `{name}` from `{source_url}` after all attempts.",
+                        error_msg,
                         parse_mode="Markdown"
                     )
                 return
 
-            logger.info(f"Successfully downloaded {name}")
+            logger.info(f"Successfully downloaded: {name} → {file_path}")
 
-            # Sending / Broadcasting logic
+            # === Send to user ===
             if source_type in ("user", "admin"):
                 await send_video_to_user(
                     file_path,
@@ -376,23 +370,30 @@ async def process_file(
                     reply_to_message_id=original_message.message_id if original_message else None
                 )
 
+            # === Broadcast ===
             if source_type == "admin":
                 await broadcast_video(file_path, name, 'admin')
             elif source_type == "channel" and config.get("channel_broadcast_enabled"):
                 await broadcast_video(file_path, name, 'channel')
 
         except Exception as e:
-            logger.error(f"Error processing {name}: {str(e)}")
+            logger.error(f"Error processing {name}: {str(e)}", exc_info=True)
+            error_text = str(e)[:100] + ("..." if len(str(e)) > 100 else "")
             if status_message or source_type != "channel" or config.get("channel_broadcast_enabled"):
                 await bot.send_message(
                     original_chat_id,
-                    f"❌ Error processing `{name}` from `{source_url}`: {str(e)[:100]}",
+                    f"Error processing `{name}` from `{source_url}`: {error_text}",
                     parse_mode="Markdown"
                 )
+
         finally:
+            # === Cleanup ===
             if file_path and os.path.exists(file_path):
-                logger.debug(f"Cleaning up temporary file: {file_path}")
-                os.unlink(file_path)
+                try:
+                    logger.debug(f"Removing temporary file: {file_path}")
+                    os.unlink(file_path)
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to delete {file_path}: {cleanup_error}")
 
 async def process_url(source_url: str, chat_id: int, source_type: str = "user", original_message: Message = None):
     logger.info(f"Processing URL: {source_url} from {source_type} {chat_id}")
