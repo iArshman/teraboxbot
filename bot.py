@@ -27,7 +27,7 @@ logging.basicConfig(
         logging.FileHandler('teradownloader.log')
     ]
 )
-
+logger = logging.getLogger(__name__)
 
 # TeraBox-specific URL regex
 LINK_REGEX = re.compile(
