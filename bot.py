@@ -13,6 +13,10 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.exceptions import TelegramBadRequest
 from motor.motor_asyncio import AsyncIOMotorClient
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from dotenv import load_dotenv
+
+# Load .env file
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -32,12 +36,12 @@ LINK_REGEX = re.compile(
 )
 
 # Configuration
-BOT_TOKEN = "bot token here"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 API_ENDPOINT = "https://terabox.itxarshman.workers.dev/api"
 SELF_HOSTED_API = "http://tgapi.arshman.space:8088"
 
 # MongoDB setup
-MONGO_URI = "url here"
+MONGO_URI = os.getenv("MONGO_URI", "")
 mongo = AsyncIOMotorClient(MONGO_URI)
 db = mongo["teradownloader"]
 config_col = db["config"]
