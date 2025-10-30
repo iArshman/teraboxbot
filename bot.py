@@ -265,36 +265,37 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
     async with sem:
         try:
             for attempt in range(4):
-                if attempt == 0:
-                    dl_url = link["original_url"]
-                    label = "proxied primary"
-                elif attempt == 1:
-                    dl_url = link["direct_url"]
-                    label = "direct fallback"
-                elif attempt == 2:
-                    logger.info(f"Refreshing links for {name}")
-                    new_resp = await get_links(source_url)
-                    if not new_resp or "links" not in new_resp:
-                        logger.error(f"Failed to refresh links for {name}")
-                        break
-                    new_link = next((l for l in new_resp["links"] if l.get("name") == name), None)
-                    if not new_link:
-                        logger.error(f"File {name} not found in refreshed links")
-                        break
-                    dl_url = new_link["original_url"]
-                    label = "new proxied"
-                elif attempt == 3:
-                    if not new_link:
-                        break
-                    dl_url = new_link["direct_url"]
-                    label = "new direct"
-                else:
-                    break
-                logger.info(f"Attempting {label} download for {name}")
-                success, file_path = await download_file(dl_url, name, size_mb, status_message)
-                if success:
-                    break
-                logger.warning(f"{label.capitalize()} failed for {name}, retrying...")
+    if attempt == 0:
+        dl_url = link.get("download_url") or link.get("original_url")
+        label = "proxied primary"
+    elif attempt == 1:
+        dl_url = link.get("original_url")
+        label = "direct fallback"
+    elif attempt == 2:
+        logger.info(f"Refreshing links for {name}")
+        new_resp = await get_links(source_url)
+        if not new_resp or "links" not in new_resp:
+            logger.error(f"Failed to refresh links for {name}")
+            break
+        new_link = next((l for l in new_resp["links"] if l.get("name") == name), None)
+        if not new_link:
+            logger.error(f"File {name} not found in refreshed links")
+            break
+        dl_url = new_link.get("download_url") or new_link.get("original_url")
+        label = "new proxied"
+    elif attempt == 3:
+        if not new_link:
+            break
+        dl_url = new_link.get("original_url")
+        label = "new direct"
+    else:
+        break
+
+    logger.info(f"Attempting {label} download for {name}")
+    success, file_path = await download_file(dl_url, name, size_mb, status_message)
+    if success:
+        break
+    logger.warning(f"{label.capitalize()} failed for {name}, retrying...")
             if not file_path:
                 logger.error(f"File {name} failed to download after all retries")
                 if status_message or source_type != "channel" or config["channel_broadcast_enabled"]:
