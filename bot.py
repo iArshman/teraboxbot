@@ -8,7 +8,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ===== CONFIG =====
-BOT_TOKEN = "8366499465:AAE72m_WzZ-sb9aJJ4YGv4KKMIXLjSafijA"
+BOT_TOKEN = "8008678561:AAFQkHfNCDXQKLxDdc9VFW3qLI2ux7hrfrk"
 API_BASE = "http://tgapi.arshman.space:8088/api"
 MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024 # 2GB
 CONCURRENT_DOWNLOADS = 15
