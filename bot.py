@@ -274,11 +274,11 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
         try:
             for attempt in range(4):
                 if attempt == 0:
-                    dl_url = link.get("direct_url") or link.get("original_url")
-                    label = "direct primary"
+                    dl_url = link.get("direct_url")
+                    label = "proxied primary"
                 elif attempt == 1:
-                    dl_url = link.get("original_url") or link.get("direct_url")
-                    label = "proxied fallback"
+                    dl_url = link.get("original_url")
+                    label = "original fallback"
                 elif attempt == 2:
                     logger.info(f"Refreshing links for {name}")
                     new_resp = await get_links(source_url)
@@ -289,13 +289,13 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
                     if not new_link:
                         logger.error(f"File {name} not found in refreshed links")
                         break
-                    dl_url = new_link.get("direct_url") or new_link.get("original_url")
-                    label = "new direct"
+                    dl_url = new_link.get("direct_url")
+                    label = "new proxied"
                 elif attempt == 3:
                     if not new_link:
                         break
-                    dl_url = new_link.get("original_url") or new_link.get("direct_url")
-                    label = "new proxied"
+                    dl_url = new_link.get("original_url")
+                    label = "new original"
                 else:
                     break
                 if not dl_url:
