@@ -72,6 +72,15 @@ router = Router(name="terabox_listener")
 sem = asyncio.Semaphore(50)
 pending_auth = {}
 
+def escape_markdown(text: str) -> str:
+    """Escape special Markdown characters for Telegram"""
+    if not text:
+        return ""
+    escape_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    for char in escape_chars:
+        text = text.replace(char, f'\\{char}')
+    return text
+
 async def get_config():
     config = await config_col.find_one({"_id": "global"})
     if not config:
@@ -193,7 +202,7 @@ async def download_file(dl_url: str, filename: str, size_mb: float, status_messa
             return await download_file(dl_url, filename, size_mb, status_message, attempt + 1)
         if status_message:
             try:
-                await status_message.edit_text(f"❌ Failed to download `{filename}` after {attempt+1} attempts.", parse_mode="Markdown")
+                await status_message.edit_text(f"❌ Failed to download {filename} after {attempt+1} attempts.", parse_mode="Markdown")
             except:
                 pass
         return False, None
@@ -249,7 +258,8 @@ async def send_video_to_user(file_path: str, video_name: str, chat_id: int, repl
         return True
     except Exception as e:
         logger.error(f"❌ Failed to send to chat {chat_id}: {str(e)[:100]}")
-        await bot.send_message(chat_id, f"❌ Failed to send `{video_name}`: {str(e)[:100]}", parse_mode="Markdown")
+        safe_error = escape_markdown(str(e)[:100])
+        await bot.send_message(chat_id, f"Failed to send {video_name}", parse_mode="HTML")
         return False
 
 async def process_file(link: dict, source_url: str, original_chat_id: int = None, source_type: str = "user", status_message: Message = None, original_message: Message = None):
@@ -261,22 +271,32 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
     if status_message and source_type != "channel":
         if size_gb > 2:
             logger.warning(f"File {name} size {size_gb:.2f} GB exceeds 2 GB limit")
-            await status_message.edit_text(f"❌ File `{name}` is too large (**{size_gb:.2f} GB**). Max 2 GB.", parse_mode="Markdown")
+            await status_message.edit_text(f"File {name} is too large ({size_gb:.2f} GB). Max 2 GB.")
             return
         if not name.lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.webm')):
             logger.info(f"Skipping non-video file: {name}")
-            await status_message.edit_text(f"ℹ️ Skipped non-video file: `{name}`. Only video files are processed.", parse_mode="Markdown")
+            await status_message.edit_text(f"Skipped non-video file: {name}. Only video files are processed.")
             return
-        await status_message.edit_text(f"📥 Found: `{name}`. Starting download...", parse_mode="Markdown")
+        await status_message.edit_text(f"Found: {name}. Starting download...")
     file_path = None
     new_link = None
     async with sem:
         try:
             for attempt in range(4):
+                dl_url = None
+                label = None
+                
+                # FIX: Check if required keys exist before accessing
                 if attempt == 0:
+                    if "direct_url" not in link:
+                        logger.warning(f"Missing 'direct_url' in link data for {name}")
+                        continue
                     dl_url = link["direct_url"]
                     label = "proxied primary"
                 elif attempt == 1:
+                    if "original_url" not in link:
+                        logger.warning(f"Missing 'original_url' in link data for {name}")
+                        continue
                     dl_url = link["original_url"]
                     label = "direct fallback"
                 elif attempt == 2:
@@ -284,30 +304,38 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
                     new_resp = await get_links(source_url)
                     if not new_resp or "links" not in new_resp:
                         logger.error(f"Failed to refresh links for {name}")
-                        break
+                        continue
                     new_link = next((l for l in new_resp["links"] if l.get("name") == name), None)
                     if not new_link:
                         logger.error(f"File {name} not found in refreshed links")
-                        break
+                        continue
+                    if "direct_url" not in new_link:
+                        logger.warning(f"Missing 'direct_url' in refreshed link data for {name}")
+                        continue
                     dl_url = new_link["direct_url"]
                     label = "new proxied"
                 elif attempt == 3:
-                    if not new_link:
-                        break
+                    if not new_link or "original_url" not in new_link:
+                        logger.warning(f"Cannot attempt new direct download: missing data for {name}")
+                        continue
                     dl_url = new_link["original_url"]
                     label = "new direct"
-                else:
-                    break
+                
+                if not dl_url or not label:
+                    continue
+                    
                 logger.info(f"Attempting {label} download for {name}")
                 success, file_path = await download_file(dl_url, name, size_mb, status_message)
                 if success:
                     break
                 logger.warning(f"{label.capitalize()} failed for {name}, retrying...")
+            
             if not file_path:
                 logger.error(f"File {name} failed to download after all retries")
-                if status_message or source_type != "channel" or config["channel_broadcast_enabled"]:
-                    await bot.send_message(original_chat_id, f"❌ Failed to download `{name}` from `{source_url}` after all attempts.", parse_mode="Markdown")
+                if source_type != "channel" or config["channel_broadcast_enabled"]:
+                    await bot.send_message(original_chat_id, f"Failed to download {name} after all attempts.")
                 return
+            
             logger.info(f"Successfully downloaded {name}")
             if source_type == "user" or source_type == "admin":
                 await send_video_to_user(file_path, name, original_chat_id, reply_to_message_id=original_message.message_id if original_message else None)
@@ -316,9 +344,12 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
             elif source_type == "channel" and config["channel_broadcast_enabled"]:
                 await broadcast_video(file_path, name, 'channel')
         except Exception as e:
-            logger.error(f"Error processing {name}: {str(e)}")
-            if status_message or source_type != "channel" or config["channel_broadcast_enabled"]:
-                await bot.send_message(original_chat_id, f"❌ Error processing `{name}` from `{source_url}`: {str(e)[:100]}", parse_mode="Markdown")
+            logger.error(f"Error processing {name}: {str(e)}", exc_info=True)
+            if source_type != "channel" or config["channel_broadcast_enabled"]:
+                try:
+                    await bot.send_message(original_chat_id, f"Error processing {name}")
+                except Exception as send_err:
+                    logger.error(f"Failed to send error message: {send_err}")
         finally:
             if file_path and os.path.exists(file_path):
                 logger.debug(f"Cleaning up temporary file: {file_path}")
@@ -331,33 +362,33 @@ async def process_url(source_url: str, chat_id: int, source_type: str = "user", 
     if not response or "links" not in response:
         logger.error(f"Failed to retrieve links for {source_url}")
         if source_type != "channel" or config["channel_broadcast_enabled"]:
-            await bot.send_message(chat_id, f"❌ Failed to retrieve links for `{source_url}`", parse_mode="Markdown")
+            await bot.send_message(chat_id, f"Failed to retrieve links for the provided URL")
         return
     links = [link for link in response["links"] if link.get("name", "").lower().endswith(('.mp4', '.mkv', '.avi', '.mov', '.webm'))]
     if not links:
         logger.info(f"No video files found for {source_url}")
         if source_type != "channel" or config["channel_broadcast_enabled"]:
-            await bot.send_message(chat_id, f"⚠️ No video files found in `{source_url}`", parse_mode="Markdown")
+            await bot.send_message(chat_id, f"No video files found in the provided URL")
         return
     for link in links:
         status_message = None
         if source_type != "channel" or config["channel_broadcast_enabled"]:
             name = link.get("name", "unknown")
-            status_message = await bot.send_message(chat_id, f"🔍 **Processing:** `{name}`. Initializing...", parse_mode="Markdown")
+            status_message = await bot.send_message(chat_id, f"Processing: {name}. Initializing...")
         asyncio.create_task(process_file(link, source_url, chat_id, source_type, status_message, original_message))
 
 @router.message(Command("start"))
 async def start(message: Message):
     logger.info(f"Start command received from user {message.from_user.id}")
     user_is_admin = await is_admin(message.from_user.id)
-    welcome_msg = "🤖 **TeraBox Downloader Bot**\n\n"
+    welcome_msg = "TeraBox Downloader Bot\n\n"
     if user_is_admin:
-        welcome_msg += "👑 Welcome back, Admin!\n\n"
-        welcome_msg += "• Send TeraBox links to download videos\n"
-        welcome_msg += "• Use /settings to configure bot\n"
+        welcome_msg += "Welcome back, Admin!\n\n"
+        welcome_msg += "- Send TeraBox links to download videos\n"
+        welcome_msg += "- Use /settings to configure bot\n"
     else:
-        welcome_msg += "📥 Send me TeraBox links and I'll download videos for you!\n\n"
-    await message.answer(welcome_msg, parse_mode="Markdown")
+        welcome_msg += "Send me TeraBox links and I will download videos for you!\n\n"
+    await message.answer(welcome_msg)
 
 @router.message(Command("settings"))
 async def settings_command(message: Message):
@@ -366,41 +397,40 @@ async def settings_command(message: Message):
         await show_settings(message)
     else:
         pending_auth[user_id] = "awaiting_password"
-        await message.answer("🔐 Enter admin password to access settings:")
+        await message.answer("Enter admin password to access settings:")
 
 async def show_settings(message: Message):
     config = await get_config()
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=f"📡 Admin Broadcast: {'✅ ON' if config['admin_broadcast_enabled'] else '❌ OFF'}",
+            text=f"Admin Broadcast: {'ON' if config['admin_broadcast_enabled'] else 'OFF'}",
             callback_data="toggle_admin_broadcast"
         )],
         [InlineKeyboardButton(
-            text=f"📺 Channel Broadcast: {'✅ ON' if config['channel_broadcast_enabled'] else '❌ OFF'}",
+            text=f"Channel Broadcast: {'ON' if config['channel_broadcast_enabled'] else 'OFF'}",
             callback_data="toggle_channel_broadcast"
         )],
         [InlineKeyboardButton(
-            text="🆔 Set Broadcast Chat ID(s)",
+            text="Set Broadcast Chat ID(s)",
             callback_data="set_broadcast_id"
         )],
     ])
     try:
         await message.answer(
             build_settings_text(config),
-            reply_markup=keyboard,
-            parse_mode="Markdown"
+            reply_markup=keyboard
         )
-    except TelegramBadRequest:
-        pass
+    except TelegramBadRequest as e:
+        logger.error(f"Failed to send settings: {e}")
 
 def build_settings_text(config):
     return (
-        f"⚙️ **Bot Settings**\n\n"
-        f"📡 Admin Broadcast: {'✅ Enabled' if config['admin_broadcast_enabled'] else '❌ Disabled'}\n"
-        f"  _(When enabled, videos from admin links are broadcasted)_\n\n"
-        f"📺 Channel Broadcast: {'✅ Enabled' if config['channel_broadcast_enabled'] else '❌ Disabled'}\n"
-        f"  _(When enabled, videos from channel posts are broadcasted)_\n\n"
-        f"🆔 Broadcast Chats: {', '.join(map(str, config['broadcast_chats'])) if config['broadcast_chats'] else 'None'}"
+        f"Bot Settings\n\n"
+        f"Admin Broadcast: {'Enabled' if config['admin_broadcast_enabled'] else 'Disabled'}\n"
+        f"(When enabled, videos from admin links are broadcasted)\n\n"
+        f"Channel Broadcast: {'Enabled' if config['channel_broadcast_enabled'] else 'Disabled'}\n"
+        f"(When enabled, videos from channel posts are broadcasted)\n\n"
+        f"Broadcast Chats: {', '.join(map(str, config['broadcast_chats'])) if config['broadcast_chats'] else 'None'}"
     )
 
 @router.callback_query()
@@ -408,19 +438,19 @@ async def settings_callback(callback: CallbackQuery):
     user_id = callback.from_user.id
     data = callback.data
     if not await is_admin(user_id):
-        await callback.answer("❌ You need admin access!", show_alert=True)
+        await callback.answer("You need admin access!", show_alert=True)
         return
     config = await get_config()
     if data == "toggle_admin_broadcast":
         new_state = not config["admin_broadcast_enabled"]
         await update_config({"admin_broadcast_enabled": new_state})
-        await update_settings_message(callback, "📡 Admin Broadcast", new_state)
+        await update_settings_message(callback, "Admin Broadcast", new_state)
     elif data == "toggle_channel_broadcast":
         new_state = not config["channel_broadcast_enabled"]
         await update_config({"channel_broadcast_enabled": new_state})
-        await update_settings_message(callback, "📺 Channel Broadcast", new_state)
+        await update_settings_message(callback, "Channel Broadcast", new_state)
     elif data == "set_broadcast_id":
-        await callback.message.answer("📨 Send new broadcast chat ID(s), comma-separated:")
+        await callback.message.answer("Send new broadcast chat ID(s), comma-separated:")
         pending_auth[user_id] = "await_broadcast_ids"
         await callback.answer()
 
@@ -428,24 +458,23 @@ async def update_settings_message(callback: CallbackQuery, label: str, state: bo
     config = await get_config()
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
-            text=f"📡 Admin Broadcast: {'✅ ON' if config['admin_broadcast_enabled'] else '❌ OFF'}",
+            text=f"Admin Broadcast: {'ON' if config['admin_broadcast_enabled'] else 'OFF'}",
             callback_data="toggle_admin_broadcast"
         )],
         [InlineKeyboardButton(
-            text=f"📺 Channel Broadcast: {'✅ ON' if config['channel_broadcast_enabled'] else '❌ OFF'}",
+            text=f"Channel Broadcast: {'ON' if config['channel_broadcast_enabled'] else 'OFF'}",
             callback_data="toggle_channel_broadcast"
         )],
         [InlineKeyboardButton(
-            text="🆔 Set Broadcast Chat ID(s)",
+            text="Set Broadcast Chat ID(s)",
             callback_data="set_broadcast_id"
         )],
     ])
     await callback.message.edit_text(
         build_settings_text(config),
-        reply_markup=keyboard,
-        parse_mode="Markdown"
+        reply_markup=keyboard
     )
-    await callback.answer(f"{label} turned {'ON' if state else 'OFF'} ✅")
+    await callback.answer(f"{label} turned {'ON' if state else 'OFF'}")
 
 @router.message()
 async def handle_message(message: Message):
@@ -459,23 +488,23 @@ async def handle_message(message: Message):
         if state == "awaiting_password":
             if text == config["admin_password"]:
                 await add_admin(user_id, message.from_user.username, message.from_user.full_name)
-                await message.answer("✅ Password accepted! You are now an admin.")
+                await message.answer("Password accepted! You are now an admin.")
                 await set_bot_commands(user_id)
                 del pending_auth[user_id]
                 await show_settings(message)
             else:
-                await message.answer("❌ Wrong password. Try /settings again.")
+                await message.answer("Wrong password. Try /settings again.")
                 del pending_auth[user_id]
             return
         if state == "await_broadcast_ids":
             try:
                 ids = [int(x.strip()) for x in text.split(",") if x.strip()]
                 await update_config({"broadcast_chats": ids})
-                await message.answer(f"✅ Updated broadcast chats: {ids}")
+                await message.answer(f"Updated broadcast chats: {ids}")
                 del pending_auth[user_id]
                 await show_settings(message)
             except ValueError:
-                await message.answer("❌ Invalid format. Please enter numeric chat IDs separated by commas.")
+                await message.answer("Invalid format. Please enter numeric chat IDs separated by commas.")
                 del pending_auth[user_id]
             return
     urls = LINK_REGEX.findall(text)
@@ -501,10 +530,10 @@ async def handle_channel_post(message: Message):
     if not urls:
         return
     chat_id = message.chat.id
-    logger.info(f"🔔 Detected TeraBox URL(s) in channel {chat_id}")
+    logger.info(f"Detected TeraBox URL(s) in channel {chat_id}")
     for url in urls:
         url = url.rstrip('.,!?')
-        logger.info(f"📥 Processing channel URL: {url}")
+        logger.info(f"Processing channel URL: {url}")
         asyncio.create_task(process_url(url, chat_id, "channel", message))
 
 # Attach router
@@ -514,6 +543,6 @@ if __name__ == "__main__":
     async def main():
         await get_config()
         await set_bot_commands()
-        logger.info("🚀 Starting TeraDownloader bot")
+        logger.info("Starting TeraDownloader bot")
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     asyncio.run(main())
