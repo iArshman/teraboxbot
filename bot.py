@@ -13,10 +13,6 @@ from aiogram.client.telegram import TelegramAPIServer
 from aiogram.exceptions import TelegramBadRequest
 from motor.motor_asyncio import AsyncIOMotorClient
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -35,12 +31,18 @@ LINK_REGEX = re.compile(
     re.IGNORECASE
 )
 
-# Configuration from environment variables
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_ENDPOINT = os.getenv("API_ENDPOINT", "https://terabox.itxarshman.workers.dev/api")
-SELF_HOSTED_API = os.getenv("SELF_HOSTED_API", "http://tgapi.arshman.space:8088")
-MONGO_URI = os.getenv("MONGO_URI")
+# Configuration
+BOT_TOKEN = "bot token here"
+API_ENDPOINT = "https://terabox.itxarshman.workers.dev/api"
+SELF_HOSTED_API = "http://tgapi.arshman.space:8088"
 
+# MongoDB setup
+MONGO_URI = "url here"
+mongo = AsyncIOMotorClient(MONGO_URI)
+db = mongo["teradownloader"]
+config_col = db["config"]
+broadcast_col = db["broadcasted"]
+admins_col = db["admins"]
 
 # Default global config
 DEFAULT_CONFIG = {
@@ -50,22 +52,6 @@ DEFAULT_CONFIG = {
     "broadcast_chats": [-1002780909369],
     "admin_password": "11223344"
 }
-
-
-# Validate required environment variables
-if not BOT_TOKEN:
-    logger.error("BOT_TOKEN is not set in environment variables")
-    raise ValueError("BOT_TOKEN is required")
-if not MONGO_URI:
-    logger.error("MONGO_URI is not set in environment variables")
-    raise ValueError("MONGO_URI is required")
-
-# MongoDB setup
-mongo = AsyncIOMotorClient(MONGO_URI)
-db = mongo["teradownloader"]
-config_col = db["config"]
-broadcast_col = db["broadcasted"]
-admins_col = db["admins"]
 
 session = AiohttpSession(api=TelegramAPIServer.from_base(SELF_HOSTED_API))
 bot = Bot(token=BOT_TOKEN, session=session)
@@ -276,11 +262,11 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
         try:
             for attempt in range(4):
                 if attempt == 0:
-                    dl_url = link.get("direct_url") or link.get("original_url")
-                    label = "direct primary"
+                    dl_url = link["original_url"]
+                    label = "proxied primary"
                 elif attempt == 1:
-                    dl_url = link.get("original_url") or link.get("direct_url")
-                    label = "proxied fallback"
+                    dl_url = link["direct_url"]
+                    label = "direct fallback"
                 elif attempt == 2:
                     logger.info(f"Refreshing links for {name}")
                     new_resp = await get_links(source_url)
@@ -291,17 +277,14 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
                     if not new_link:
                         logger.error(f"File {name} not found in refreshed links")
                         break
-                    dl_url = new_link.get("direct_url") or new_link.get("original_url")
-                    label = "new direct"
+                    dl_url = new_link["original_url"]
+                    label = "new proxied"
                 elif attempt == 3:
                     if not new_link:
                         break
-                    dl_url = new_link.get("original_url") or new_link.get("direct_url")
-                    label = "new proxied"
+                    dl_url = new_link["direct_url"]
+                    label = "new direct"
                 else:
-                    break
-                if not dl_url:
-                    logger.error(f"No download URL available for {name}")
                     break
                 logger.info(f"Attempting {label} download for {name}")
                 success, file_path = await download_file(dl_url, name, size_mb, status_message)
