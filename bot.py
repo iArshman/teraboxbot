@@ -37,7 +37,8 @@ LINK_REGEX = re.compile(
 
 # Configuration
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-API_ENDPOINT = "https://terabox.itxarshman.workers.dev/api"
+API_ENDPOINT = "https://terabox-worker.robinkumarshakya103.workers.dev/api"
+
 SELF_HOSTED_API = "http://tgapi.arshman.space:8088"
 
 # MongoDB setup
@@ -133,12 +134,46 @@ async def get_links(source_url: str):
         try:
             async with session.get(f"{API_ENDPOINT}?url={source_url}") as resp:
                 if resp.status == 200:
-                    logger.info(f"Successfully retrieved links for {source_url}")
-                    return await resp.json()
+                    data = await resp.json()
+                    if data.get("success") and "files" in data:
+                        # Convert new API format to old format for compatibility
+                        converted_response = {
+                            "links": [
+                                {
+                                    "name": file.get("file_name", "unknown"),
+                                    "size_mb": parse_size_to_mb(file.get("size", "0 MB")),
+                                    "original_url": file.get("download_url", ""),
+                                    "direct_url": file.get("original_download_url", ""),
+                                    "streaming_url": file.get("streaming_url", "")
+                                }
+                                for file in data["files"]
+                            ]
+                        }
+                        logger.info(f"Successfully retrieved {len(converted_response['links'])} files for {source_url}")
+                        return converted_response
+                    else:
+                        logger.error(f"API returned unsuccessful response or no files: {data}")
+                        return None
                 logger.error(f"API request failed for {source_url}, status: {resp.status}")
         except Exception as e:
             logger.error(f"Error fetching links for {source_url}: {str(e)}")
     return None
+
+# 3. Add helper function to parse size string to MB (add after get_links):
+def parse_size_to_mb(size_str: str) -> float:
+    """Convert size string like '724.52 MB' or '1.5 GB' to MB"""
+    try:
+        size_str = size_str.strip().upper()
+        if 'GB' in size_str:
+            return float(size_str.replace('GB', '').strip()) * 1024
+        elif 'MB' in size_str:
+            return float(size_str.replace('MB', '').strip())
+        elif 'KB' in size_str:
+            return float(size_str.replace('KB', '').strip()) / 1024
+        else:
+            return 0.0
+    except:
+        return 0.0
 
 async def download_file(dl_url: str, filename: str, size_mb: float, status_message: Message, attempt: int = 0):
     path = tempfile.NamedTemporaryFile(delete=False).name
@@ -274,11 +309,11 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
         try:
             for attempt in range(4):
                 if attempt == 0:
-                    dl_url = link["original_url"]
-                    label = "proxied primary"
+                    dl_url = link.get("streaming_url", "")  # Try streaming URL first
+                    label = "streaming primary"
                 elif attempt == 1:
-                    dl_url = link["direct_url"]
-                    label = "direct fallback"
+                    dl_url = link.get("original_url", "")  # This is the proxied download_url
+                    label = "proxied download fallback"
                 elif attempt == 2:
                     logger.info(f"Refreshing links for {name}")
                     new_resp = await get_links(source_url)
@@ -289,15 +324,20 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
                     if not new_link:
                         logger.error(f"File {name} not found in refreshed links")
                         break
-                    dl_url = new_link["original_url"]
-                    label = "new proxied"
+                    dl_url = new_link.get("streaming_url", "")
+                    label = "new streaming"
                 elif attempt == 3:
                     if not new_link:
                         break
-                    dl_url = new_link["direct_url"]
-                    label = "new direct"
+                    dl_url = new_link.get("direct_url", "")  # Original download URL
+                    label = "original direct"
                 else:
                     break
+                
+                if not dl_url:
+                    logger.warning(f"No download URL available for attempt {attempt} ({label})")
+                    continue
+                    
                 logger.info(f"Attempting {label} download for {name}")
                 success, file_path = await download_file(dl_url, name, size_mb, status_message)
                 if success:
