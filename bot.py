@@ -14,6 +14,7 @@ from aiogram.exceptions import TelegramBadRequest
 from motor.motor_asyncio import AsyncIOMotorClient
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from dotenv import load_dotenv
+from aiohttp.client_exceptions import ClientPayloadError, ContentLengthError
 
 # Load .env file
 load_dotenv()
