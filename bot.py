@@ -143,8 +143,8 @@ async def get_links(source_url: str):
         links.append({
             "name": f.get("file_name"),
             "size_mb": size_mb,
-            "download_url": f.get("download_url"),  # ✅ worker-proxied
-            "original_download_url": f.get("original_download_url"),  # ✅ fallback
+            "proxified_url": f.get("proxified_download_url"),  # 🆕 primary URL
+            "direct_url": f.get("download_url"),                # 🆕 fallback
         })
     return {"links": links}
 
@@ -261,7 +261,9 @@ async def send_video_to_user(file_path: str, video_name: str, chat_id: int, repl
         await bot.send_message(chat_id, f"❌ Failed to send `{video_name}`: {str(e)[:100]}", parse_mode="Markdown")
         return False
 
-async def process_file(link: dict, source_url: str, original_chat_id: int = None, source_type: str = "user", status_message: Message = None, original_message: Message = None):
+async def process_file(link: dict, source_url: str, original_chat_id: int = None,
+                       source_type: str = "user", status_message: Message = None,
+                       original_message: Message = None):
     name = link.get("name", "unknown")
     size_mb = link.get("size_mb", 0)
     size_gb = size_mb / 1024
@@ -291,12 +293,13 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
     async with sem:
         try:
             for attempt in range(4):
+                # Attempt sequence: proxified → direct → refreshed proxified → refreshed direct
                 if attempt == 0:
-                    dl_url = link["original_url"]
-                    label = "original"
+                    dl_url = link.get("proxified_url")
+                    label = "proxified"
                 elif attempt == 1:
-                    dl_url = link["direct_url"]
-                    label = "proxied fallback"
+                    dl_url = link.get("direct_url")
+                    label = "direct fallback"
                 elif attempt == 2:
                     logger.info(f"Refreshing links for {name}")
                     new_resp = await get_links(source_url)
@@ -307,13 +310,17 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
                     if not new_link:
                         logger.error(f"File {name} not found in refreshed links")
                         break
-                    dl_url = new_link["original_url"]
-                    label = "refreshed original"
+                    dl_url = new_link.get("proxified_url")
+                    label = "refreshed proxified"
                 elif attempt == 3 and new_link:
-                    dl_url = new_link["direct_url"]
-                    label = "refreshed proxied"
+                    dl_url = new_link.get("direct_url")
+                    label = "refreshed direct"
                 else:
                     break
+
+                if not dl_url:
+                    logger.warning(f"⚠️ Missing URL for {label} attempt of {name}")
+                    continue
 
                 logger.info(f"Attempting {label} download for {name}")
                 success, file_path = await download_file(dl_url, name, size_mb, status_message)
@@ -324,12 +331,21 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
             if not file_path:
                 logger.error(f"File {name} failed to download after all retries")
                 if status_message or source_type != "channel" or config["channel_broadcast_enabled"]:
-                    await bot.send_message(original_chat_id, f"❌ Failed to download `{name}` from `{source_url}` after all attempts.", parse_mode="Markdown")
+                    await bot.send_message(
+                        original_chat_id,
+                        f"❌ Failed to download `{name}` from `{source_url}` after all attempts.",
+                        parse_mode="Markdown"
+                    )
                 return
 
             # Send video to appropriate destination
             if source_type == "user" or source_type == "admin":
-                await send_video_to_user(file_path, name, original_chat_id, reply_to_message_id=original_message.message_id if original_message else None)
+                await send_video_to_user(
+                    file_path,
+                    name,
+                    original_chat_id,
+                    reply_to_message_id=original_message.message_id if original_message else None
+                )
             if source_type == "admin":
                 await broadcast_video(file_path, name, 'admin')
             elif source_type == "channel" and config["channel_broadcast_enabled"]:
@@ -338,11 +354,17 @@ async def process_file(link: dict, source_url: str, original_chat_id: int = None
         except Exception as e:
             logger.error(f"Error processing {name}: {str(e)}")
             if status_message or source_type != "channel" or config["channel_broadcast_enabled"]:
-                await bot.send_message(original_chat_id, f"❌ Error processing `{name}`: {str(e)[:100]}", parse_mode="Markdown")
+                await bot.send_message(
+                    original_chat_id,
+                    f"❌ Error processing `{name}`: {str(e)[:100]}",
+                    parse_mode="Markdown"
+                )
         finally:
             if file_path and os.path.exists(file_path):
                 logger.debug(f"Cleaning up temporary file: {file_path}")
                 os.unlink(file_path)
+
+
 
 
 async def process_url(source_url: str, chat_id: int, source_type: str = "user", original_message: Message = None):
