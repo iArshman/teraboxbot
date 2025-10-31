@@ -14,6 +14,7 @@ from aiogram.exceptions import TelegramBadRequest
 from motor.motor_asyncio import AsyncIOMotorClient
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from dotenv import load_dotenv
+from aiohttp import ClientTimeout
 
 # Load .env file
 load_dotenv()
@@ -149,69 +150,73 @@ async def get_links(source_url: str):
     return {"links": links}
 
 
-async def download_file(dl_url: str, filename: str, size_mb: float, status_message: Message, attempt: int = 0):
-    path = tempfile.NamedTemporaryFile(delete=False).name
+PARALLEL_SEGMENTS = 4
+CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB
+
+async def fetch_range(session, url, start, end, part_path, status_message=None, idx=0):
+    """Download a specific byte range of a file."""
+    headers = {"Range": f"bytes={start}-{end}"}
     downloaded = 0
-    start_time = time.time()
-    last_update_time = 0
-    logger.info(f"Starting download of {filename} from {dl_url} (attempt {attempt + 1})")
-    try:
-        async with sem:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(dl_url) as resp:
-                    if resp.status != 200:
-                        logger.error(f"Download failed for {filename}, status: {resp.status}")
-                        raise Exception(f"HTTP Status {resp.status}")
-                    content_length = int(resp.headers.get('Content-Length', 0))
-                    total_mb = content_length / (1024 * 1024) if content_length else size_mb
-                    async for chunk in resp.content.iter_chunked(5 * 1024 * 1024):
-                        with open(path, 'ab') as f:
-                            f.write(chunk)
-                        downloaded += len(chunk)
-                        if time.time() - last_update_time > 5 and status_message:
-                            elapsed = time.time() - start_time
-                            speed_bps = (downloaded / elapsed) if elapsed > 0 else 0
-                            speed_mbps = speed_bps / (1024 * 1024)
-                            percent = (downloaded / (total_mb * 1024 * 1024)) * 100 if total_mb else 0
-                            progress_text = (
-                                f"📥 **Downloading** `{filename}`\n"
-                                f"📦 Size: **{total_mb:.2f} MB**\n"
-                                f"⬇️ Progress: **{downloaded / (1024 * 1024):.2f}/{total_mb:.2f} MB** (**{percent:.0f}%**)\n"
-                                f"⚡ Speed: **{speed_mbps:.2f} MB/s**"
-                            )
-                            try:
-                                await bot.edit_message_text(
-                                    chat_id=status_message.chat.id,
-                                    message_id=status_message.message_id,
-                                    text=progress_text,
-                                    parse_mode="Markdown"
-                                )
-                                last_update_time = time.time()
-                            except TelegramBadRequest as e:
-                                if "message is not modified" not in str(e):
-                                    logger.error(f"Telegram update error: {e}")
-                    logger.info(f"Download completed for {filename}")
-    except Exception as e:
-        logger.error(f"Download error for {filename}: {str(e)}")
-        if os.path.exists(path):
-            os.unlink(path)
-        if attempt < 2:
-            backoff = 2 ** attempt
-            logger.info(f"Retrying download for {filename} after {backoff}s")
-            await asyncio.sleep(backoff)
-            return await download_file(dl_url, filename, size_mb, status_message, attempt + 1)
-        if status_message:
-            try:
-                await status_message.edit_text(f"❌ Failed to download `{filename}` after {attempt+1} attempts.", parse_mode="Markdown")
-            except:
-                pass
-        return False, None
-    if status_message:
+    t0 = time.time()
+
+    async with session.get(url, headers=headers, timeout=ClientTimeout(total=None)) as resp:
+        if resp.status not in (200, 206):
+            raise Exception(f"Bad status {resp.status} for range {start}-{end}")
+
+        async with aiofiles.open(part_path, "wb") as f:
+            async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
+                await f.write(chunk)
+                downloaded += len(chunk)
+
+    duration = time.time() - t0
+    speed = downloaded / (1024 * 1024) / duration if duration > 0 else 0
+    print(f"✅ Segment {idx+1} done ({downloaded/1024/1024:.1f} MB @ {speed:.1f} MB/s)")
+    return downloaded
+
+async def download_file(url, filename, size_mb, status_message=None):
+    """Optimized downloader using parallel ranged requests."""
+    total_size = int(size_mb * 1024 * 1024)
+    temp_dir = tempfile.gettempdir()
+    temp_path = os.path.join(temp_dir, filename)
+    part_paths = [f"{temp_path}.part{i}" for i in range(PARALLEL_SEGMENTS)]
+
+    print(f"🚀 Starting download of {filename} ({size_mb:.2f} MB) using {PARALLEL_SEGMENTS} segments...")
+
+    # Prepare byte ranges
+    segment_size = math.ceil(total_size / PARALLEL_SEGMENTS)
+    ranges = [(i * segment_size, min((i + 1) * segment_size - 1, total_size - 1))
+              for i in range(PARALLEL_SEGMENTS)]
+
+    connector = aiohttp.TCPConnector(limit=PARALLEL_SEGMENTS * 2)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        tasks = [
+            fetch_range(session, url, start, end, part_paths[i], status_message, i)
+            for i, (start, end) in enumerate(ranges)
+        ]
+
         try:
-            await bot.delete_message(status_message.chat.id, status_message.message_id)
-        except:
-            pass
-    return True, path
+            results = await asyncio.gather(*tasks)
+        except Exception as e:
+            print(f"❌ Parallel download failed: {e}")
+            for p in part_paths:
+                if os.path.exists(p):
+                    os.remove(p)
+            return False, None
+
+    # Merge all parts
+    print("🧩 Merging segments...")
+    async with aiofiles.open(temp_path, "wb") as outfile:
+        for p in part_paths:
+            async with aiofiles.open(p, "rb") as infile:
+                while chunk := await infile.read(CHUNK_SIZE):
+                    await outfile.write(chunk)
+            os.remove(p)
+
+    total_downloaded = sum(results)
+    duration = sum(os.path.getsize(p) for p in part_paths) / (1024 * 1024)
+    print(f"✅ Download complete: {filename} ({total_downloaded/1024/1024:.2f} MB total)")
+
+    return True, temp_path
 
 async def broadcast_video(file_path: str, video_name: str, broadcast_type: str):
     config = await get_config()
