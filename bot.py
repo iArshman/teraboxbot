@@ -15,7 +15,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from dotenv import load_dotenv
 from aiohttp import ClientTimeout
-
+import math
 # Load .env file
 load_dotenv()
 
@@ -150,35 +150,36 @@ async def get_links(source_url: str):
     return {"links": links}
 
 
-PARALLEL_SEGMENTS = 4
 CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB
 
-async def fetch_range(session, url, start, end, part_path, status_message=None, idx=0):
-    """Download a specific byte range of a file."""
+async def fetch_range(session, url, start, end, part_path, idx):
+    """Download a specific byte range of the file."""
     headers = {"Range": f"bytes={start}-{end}"}
     downloaded = 0
-    t0 = time.time()
+    start_time = time.time()
 
     async with session.get(url, headers=headers, timeout=ClientTimeout(total=None)) as resp:
         if resp.status not in (200, 206):
-            raise Exception(f"Bad status {resp.status} for range {start}-{end}")
+            raise Exception(f"Bad status {resp.status} for range {start}-{end} ({resp.status})")
 
         async with aiofiles.open(part_path, "wb") as f:
             async for chunk in resp.content.iter_chunked(CHUNK_SIZE):
                 await f.write(chunk)
                 downloaded += len(chunk)
 
-    duration = time.time() - t0
+    duration = time.time() - start_time
     speed = downloaded / (1024 * 1024) / duration if duration > 0 else 0
     print(f"✅ Segment {idx+1} done ({downloaded/1024/1024:.1f} MB @ {speed:.1f} MB/s)")
     return downloaded
 
 async def download_file(url, filename, size_mb, status_message=None):
-    """Optimized downloader using parallel ranged requests."""
+    """High-speed downloader with adaptive parallel segmentation."""
     total_size = int(size_mb * 1024 * 1024)
     temp_dir = tempfile.gettempdir()
     temp_path = os.path.join(temp_dir, filename)
-    part_paths = [f"{temp_path}.part{i}" for i in range(PARALLEL_SEGMENTS)]
+
+    # Adaptive segment count
+    PARALLEL_SEGMENTS = 4 if size_mb <= 100 else 6
 
     print(f"🚀 Starting download of {filename} ({size_mb:.2f} MB) using {PARALLEL_SEGMENTS} segments...")
 
@@ -187,10 +188,13 @@ async def download_file(url, filename, size_mb, status_message=None):
     ranges = [(i * segment_size, min((i + 1) * segment_size - 1, total_size - 1))
               for i in range(PARALLEL_SEGMENTS)]
 
+    # Temporary part files
+    part_paths = [f"{temp_path}.part{i}" for i in range(PARALLEL_SEGMENTS)]
+
     connector = aiohttp.TCPConnector(limit=PARALLEL_SEGMENTS * 2)
     async with aiohttp.ClientSession(connector=connector) as session:
         tasks = [
-            fetch_range(session, url, start, end, part_paths[i], status_message, i)
+            fetch_range(session, url, start, end, part_paths[i], i)
             for i, (start, end) in enumerate(ranges)
         ]
 
@@ -198,12 +202,13 @@ async def download_file(url, filename, size_mb, status_message=None):
             results = await asyncio.gather(*tasks)
         except Exception as e:
             print(f"❌ Parallel download failed: {e}")
+            # cleanup
             for p in part_paths:
                 if os.path.exists(p):
                     os.remove(p)
             return False, None
 
-    # Merge all parts
+    # Merge parts
     print("🧩 Merging segments...")
     async with aiofiles.open(temp_path, "wb") as outfile:
         for p in part_paths:
@@ -213,9 +218,7 @@ async def download_file(url, filename, size_mb, status_message=None):
             os.remove(p)
 
     total_downloaded = sum(results)
-    duration = sum(os.path.getsize(p) for p in part_paths) / (1024 * 1024)
     print(f"✅ Download complete: {filename} ({total_downloaded/1024/1024:.2f} MB total)")
-
     return True, temp_path
 
 async def broadcast_video(file_path: str, video_name: str, broadcast_type: str):
