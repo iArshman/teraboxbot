@@ -129,30 +129,25 @@ async def set_bot_commands(user_id: int = None):
 
 async def get_links(source_url: str):
     api_url = f"{API_BASE}/api?url={source_url}"
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url, timeout=60) as resp:
-                data = await resp.json()
-                if not data.get("success"):
-                    logger.error(f"API error: {data.get('error')}")
-                    return None
-                # Convert Worker API response to unified structure for process_file
-                links = []
-                for f in data.get("files", []):
-                    size_str = f.get("size", "0 MB")
-                    size_mb = float(size_str.split()[0]) if "MB" in size_str else (
-                        float(size_str.split()[0]) * 1024 if "GB" in size_str else 0
-                    )
-                    links.append({
-                        "name": f.get("file_name"),
-                        "size_mb": size_mb,
-                        "original_url": f.get("original_download_url"),
-                        "direct_url": f.get("download_url"),
-                    })
-                return {"links": links}
-    except Exception as e:
-        logger.error(f"Error fetching links: {e}")
+    async with aiohttp.ClientSession() as session:
+        async with session.get(api_url) as resp:
+            data = await resp.json()
+
+    if not data.get("success") or not data.get("files"):
         return None
+
+    links = []
+    for f in data["files"]:
+        size_str = f.get("size", "0 MB").split()[0]
+        size_mb = float(size_str) if "MB" in f.get("size", "") else float(size_str) * 1024
+        links.append({
+            "name": f.get("file_name"),
+            "size_mb": size_mb,
+            "download_url": f.get("download_url"),  # ✅ worker-proxied
+            "original_download_url": f.get("original_download_url"),  # ✅ fallback
+        })
+    return {"links": links}
+
 
 async def download_file(dl_url: str, filename: str, size_mb: float, status_message: Message, attempt: int = 0):
     path = tempfile.NamedTemporaryFile(delete=False).name
